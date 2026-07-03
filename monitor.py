@@ -313,4 +313,4 @@ def run_ping_server():
 
 if __name__ == "__main__":
     threading.Thread(target=run_ping_server, daemon=True).start()
-    asyncio.run(monitor_loop())    asyncio.run(monitor_loop())
+    asyncio.run(monitor_loop())
