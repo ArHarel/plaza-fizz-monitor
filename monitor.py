@@ -1,9 +1,12 @@
-#!/usr/bin/env python3
+##!/usr/bin/env python3
 """
 Persistent availability monitor for two student-housing sites in Utrecht:
 
   1. Plaza (newnewnew.space) — Limapad / Campus 030
-     JS-rendered site -> needs Playwright.
+     JS-rendered site -> needs Playwright (ASYNC API — Render's environment
+     conflicts with Playwright's sync API, which needs a thread with no
+     event loop at all; the async API avoids that by running under our own
+     single asyncio event loop instead).
 
   2. THE FIZZ (the-fizz.com) — Utrecht building
      Plain server-rendered HTML -> plain HTTP request, no browser needed.
@@ -26,6 +29,7 @@ Optional:
   CHECK_INTERVAL_SECONDS   default 20
   PORT                     default 10000 (Render sets this automatically)
 """
+import asyncio
 import json
 import os
 import threading
@@ -35,7 +39,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 # ---------------------------------------------------------------------------
 # Config
@@ -95,24 +99,24 @@ def send_telegram(text: str):
 
 
 # ---------------------------------------------------------------------------
-# Plaza check (Playwright, JS-rendered)
+# Plaza check (Playwright ASYNC API, JS-rendered)
 # ---------------------------------------------------------------------------
 _browser = None
 _pw = None
 
 
-def get_browser():
+async def get_browser():
     """Reuse a single browser instance across checks instead of relaunching
     it every cycle — relaunch is by far the slowest part."""
     global _browser, _pw
     if _browser is None:
-        _pw = sync_playwright().start()
-        _browser = _pw.chromium.launch(args=["--no-sandbox"])
+        _pw = await async_playwright().start()
+        _browser = await _pw.chromium.launch(args=["--no-sandbox"])
     return _browser
 
 
-def get_text(page, url, wait_ms=4000):
-    page.goto(url, timeout=60000, wait_until="domcontentloaded")
+async def get_text(page, url, wait_ms=4000):
+    await page.goto(url, timeout=60000, wait_until="domcontentloaded")
     for sel in [
         "text=/accept/i",
         "text=/accepteren/i",
@@ -121,20 +125,20 @@ def get_text(page, url, wait_ms=4000):
     ]:
         try:
             el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible():
-                el.click(timeout=1500)
+            if await el.count() > 0 and await el.is_visible():
+                await el.click(timeout=1500)
                 break
         except Exception:
             pass
-    page.wait_for_timeout(wait_ms)
+    await page.wait_for_timeout(wait_ms)
     chunks = []
     try:
-        chunks.append(page.evaluate("document.body ? document.body.innerText : ''"))
+        chunks.append(await page.evaluate("document.body ? document.body.innerText : ''"))
     except Exception:
         pass
     for f in page.frames:
         try:
-            t = f.evaluate("document.body ? document.body.innerText : ''")
+            t = await f.evaluate("document.body ? document.body.innerText : ''")
             if t:
                 chunks.append(t)
         except Exception:
@@ -160,14 +164,14 @@ def plaza_complex_available(complex_text):
     return True
 
 
-def check_plaza():
-    browser = get_browser()
-    page = browser.new_page(user_agent=UA, locale="en-GB")
+async def check_plaza():
+    browser = await get_browser()
+    page = await browser.new_page(user_agent=UA, locale="en-GB")
     try:
-        list_text = get_text(page, PLAZA_LIST_URL)
-        complex_text = get_text(page, PLAZA_COMPLEX_URL)
+        list_text = await get_text(page, PLAZA_LIST_URL)
+        complex_text = await get_text(page, PLAZA_COMPLEX_URL)
     finally:
-        page.close()
+        await page.close()
 
     if "Host not in allowlist" in list_text or "Host not in allowlist" in complex_text:
         return None  # egress-blocked environment, skip
@@ -213,14 +217,19 @@ def handle_plaza_result(current, prev):
 
 
 # ---------------------------------------------------------------------------
-# Fizz check (plain HTTP, static HTML)
+# Fizz check (plain HTTP, static HTML) — run in a thread so it never blocks
+# the event loop that Plaza's browser checks are running on.
 # ---------------------------------------------------------------------------
-def check_fizz():
+def _fetch_fizz():
     resp = requests.get(FIZZ_URL, headers={"User-Agent": UA}, timeout=20)
     resp.raise_for_status()
     low = resp.text.lower()
     fully_booked = any(p in low for p in FIZZ_FULLY_BOOKED_PHRASES)
     return {"fully_booked": fully_booked}
+
+
+async def check_fizz():
+    return await asyncio.to_thread(_fetch_fizz)
 
 
 def handle_fizz_result(current, prev):
@@ -244,9 +253,9 @@ def handle_fizz_result(current, prev):
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# Main loop (asyncio)
 # ---------------------------------------------------------------------------
-def monitor_loop():
+async def monitor_loop():
     plaza_state = None
     fizz_state = None
 
@@ -259,13 +268,13 @@ def monitor_loop():
         cycle_start = time.time()
 
         try:
-            plaza_current = check_plaza()
+            plaza_current = await check_plaza()
             plaza_state = handle_plaza_result(plaza_current, plaza_state)
         except Exception:
             print("[Plaza] ERROR:\n" + traceback.format_exc(), flush=True)
 
         try:
-            fizz_current = check_fizz()
+            fizz_current = await check_fizz()
             fizz_state = handle_fizz_result(fizz_current, fizz_state)
         except Exception:
             print("[Fizz] ERROR:\n" + traceback.format_exc(), flush=True)
@@ -273,11 +282,13 @@ def monitor_loop():
         elapsed = time.time() - cycle_start
         sleep_for = max(0.0, CHECK_INTERVAL_SECONDS - elapsed)
         print(f"Cycle took {elapsed:.1f}s, sleeping {sleep_for:.1f}s", flush=True)
-        time.sleep(sleep_for)
+        await asyncio.sleep(sleep_for)
 
 
 # ---------------------------------------------------------------------------
-# Tiny keep-alive HTTP server (Render requires something bound to $PORT)
+# Tiny keep-alive HTTP server (Render requires something bound to $PORT).
+# Runs in a plain background thread — no asyncio involved, so it can't
+# interfere with the event loop the monitor loop owns.
 # ---------------------------------------------------------------------------
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -296,5 +307,5 @@ def run_ping_server():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    run_ping_server()
+    threading.Thread(target=run_ping_server, daemon=True).start()
+    asyncio.run(monitor_loop())
