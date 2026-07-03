@@ -296,5 +296,5 @@ def run_ping_server():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=run_ping_server, daemon=True).start()
-    monitor_loop()
+    threading.Thread(target=monitor_loop, daemon=True).start()
+    run_ping_server()
