@@ -1,4 +1,4 @@
-##!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Persistent availability monitor for two student-housing sites in Utrecht:
 
@@ -297,6 +297,11 @@ class PingHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Monitor is running.")
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass  # silence default request logging
 
@@ -308,4 +313,4 @@ def run_ping_server():
 
 if __name__ == "__main__":
     threading.Thread(target=run_ping_server, daemon=True).start()
-    asyncio.run(monitor_loop())
+    asyncio.run(monitor_loop())    asyncio.run(monitor_loop())
