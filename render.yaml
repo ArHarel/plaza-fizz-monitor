@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: plaza-fizz-monitor
+    env: python
+    plan: free
+    buildCommand: bash build.sh
+    startCommand: python monitor.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CHECK_INTERVAL_SECONDS
+        value: "20"
